@@ -38,7 +38,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI,
 // Game state
 // ============================================================================
 constexpr int PADDLE_WIDTH = 2;
-constexpr int PADDLE_HEIGHT = 20;
+constexpr int PADDLE_HEIGHT = 10;
 constexpr int PADDLE_MARGIN = 4;
 
 int ownPaddleY = (SCREEN_HEIGHT - PADDLE_HEIGHT) / 2;
