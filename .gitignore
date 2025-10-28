@@ -1,0 +1,59 @@
+# Compiled object files
+*.o
+*.obj
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Compiled static libraries
+*.a
+*.lib
+
+# Compiled dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Executables
+*.exe
+*.out
+*.app
+*.elf
+*.hex
+*.bin
+
+# Arduino build folders
+*.arduino_build*
+*.arduino_cache*
+*.ino.cpp
+*.ino.*
+*.ino.d
+*.cpp.d
+
+# Build directories
+build/
+build*/
+out/
+dist/
+
+# Temporary files
+*~
+*.swp
+*.tmp
+*.log
+
+# VS Code / PlatformIO
+.vscode/
+.pio/
+.pioenvs/
+.piolibdeps/
+.clangd/
+.clang-tidy
+.ccls-cache/
+.idea/
+*.code-workspace
+
+# macOS / Windows artifacts
+.DS_Store
+Thumbs.db
