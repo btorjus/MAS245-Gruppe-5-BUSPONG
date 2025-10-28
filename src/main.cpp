@@ -4,333 +4,417 @@
 #include <FlexCAN_T4.h>
 #include <SPI.h>
 #include <Wire.h>
-#include <string.h>
-#include "pong.h"
 
-namespace carrier
+// ============================================================================
+// Pin definitions
+// ============================================================================
+namespace pin
 {
-  namespace pin
-  {
-    constexpr uint8_t joyLeft{18};
-    constexpr uint8_t joyRight{17};
-    constexpr uint8_t joyClick{19};
-    constexpr uint8_t joyUp{22};
-    constexpr uint8_t joyDown{23};
+  constexpr uint8_t joyUp{22};
+  constexpr uint8_t joyDown{23};
+  constexpr uint8_t joyClick{19};
 
-    constexpr uint8_t oledDcPower{6};
-    constexpr uint8_t oledCs{10};
-    constexpr uint8_t oledReset{5};
-  }
-
-  namespace oled
-  {
-    constexpr uint8_t screenWidth{128}; // OLED display width in pixels
-    constexpr uint8_t screenHeight{64}; // OLED display height in pixels
-  }
+  constexpr uint8_t oledDcPower{6};
+  constexpr uint8_t oledCs{10};
+  constexpr uint8_t oledReset{5};
 }
 
-namespace
-{
-  // Project CAN ID configuration (change GROUP once per team)
-  constexpr uint8_t GROUP = 5; // <--- set your group number here
-  constexpr uint16_t PADDLE_ID = static_cast<uint16_t>(GROUP + 20);
-  constexpr uint16_t BALL_ID   = static_cast<uint16_t>(GROUP + 50);
+// ============================================================================
+// Display and CAN configuration
+// ============================================================================
+constexpr uint8_t SCREEN_WIDTH = 128;
+constexpr uint8_t SCREEN_HEIGHT = 64;
+constexpr uint8_t GROUP = 5; // <--- Set your group number here
+constexpr uint8_t NODE_ID = 1; // <--- IMPORTANT: Set to 1 on first Teensy, 2 on second Teensy
 
-  FlexCAN_T4<CAN0, RX_SIZE_256, TX_SIZE_16> can0;
-  // FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> can1;
+constexpr uint16_t PADDLE_ID = GROUP + 20;
+constexpr uint16_t BALL_ID = GROUP + 50;
 
-  Adafruit_SSD1306 display(carrier::oled::screenWidth,
-                           carrier::oled::screenHeight,
-                           &SPI,
-                           carrier::pin::oledDcPower,
-                           carrier::pin::oledReset,
-                           carrier::pin::oledCs);
-}
+FlexCAN_T4<CAN0, RX_SIZE_256, TX_SIZE_16> can0;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, 
+                         pin::oledDcPower, pin::oledReset, pin::oledCs);
 
-void canReceiveAndEcho();
-// Pong game instance (created in setup)
-Pong *pongGame = nullptr;
+// ============================================================================
+// Game state
+// ============================================================================
+constexpr int PADDLE_WIDTH = 2;
+constexpr int PADDLE_HEIGHT = 20;
+constexpr int PADDLE_MARGIN = 4;
 
-// Master flags and ball state for Part 3 (master sends ball at 100 Hz)
-static bool isMaster = false;
-static bool masterAssigned = false;
-static int16_t netBallX = 0;
-static int16_t netBallY = 0;
-static int8_t netBallVX = 0;
-static int8_t netBallVY = 0;
-static uint32_t lastBallSend = 0;
+int ownPaddleY = (SCREEN_HEIGHT - PADDLE_HEIGHT) / 2;
+int opponentPaddleY = (SCREEN_HEIGHT - PADDLE_HEIGHT) / 2;
 
+int ballX = -1;
+int ballY = -1;
+bool ballActive = false;
+
+bool isMaster = false;
+bool masterAssigned = false;
+bool gameActive = false;
+
+// Ball physics (master only)
+float masterBallX = 0;
+float masterBallY = 0;
+float masterBallVX = 0;
+float masterBallVY = 0;
+
+int scoreOwn = 0;
+int scoreOpponent = 0;
+
+// Timing
+uint32_t lastPaddleSend = 0;
+uint32_t lastBallSend = 0;
+uint32_t lastGameUpdate = 0;
+
+// ============================================================================
+// Function declarations
+// ============================================================================
+void processCAN();
+void sendPaddle();
 void sendBall();
+void updateGame();
+void drawGame();
+void handleInput();
+void resetBall(bool towardsOpponent);
 
+// ============================================================================
+// Setup
+// ============================================================================
 void setup()
 {
   Serial.begin(9600);
-  // Wait a short while for the USB serial to enumerate so messages are not lost
   unsigned long serialWaitStart = millis();
-  while (!Serial && (millis() - serialWaitStart) < 2000)
-  {
-    ; // wait up to 2s for host to open virtual COM port
-  }
-  Serial.println();
-  Serial.println(F("Booting Teensy project..."));
+  while (!Serial && (millis() - serialWaitStart) < 2000) {}
+  
+  Serial.println(F("\n=== CAN Pong - Group 5 ==="));
+  Serial.print(F("Node ID: "));
+  Serial.println(NODE_ID);
+
+  // Initialize CAN
   can0.begin();
   can0.setBaudRate(500000);
+  Serial.println(F("CAN initialized at 500kbps"));
 
-
-  // Gen. display voltage from 3.3V (https://adafruit.github.io/Adafruit_SSD1306/html/_adafruit___s_s_d1306_8h.html#ad9d18b92ad68b542033c7e5ccbdcced0)
+  // Initialize display
   if (!display.begin(SSD1306_SWITCHCAPVCC))
   {
-    Serial.println(F("ERROR: display.begin(SSD1306_SWITCHCAPVCC) failed."));
-    Serial.println(F("Continuing without OLED (for debugging)."));
-    // Do not block here; continue so serial debug is available.
+    Serial.println(F("ERROR: Display init failed!"));
   }
 
   display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(20, 20);
+  display.println(F("CAN PONG"));
+  display.setCursor(10, 35);
+  display.print(F("Node ID: "));
+  display.println(NODE_ID);
+  display.setCursor(5, 50);
+  display.println(F("Press joystick"));
   display.display();
 
-  Serial.print(F("float size in bytes: "));
-  Serial.println(sizeof(float));
+  // Initialize joystick pins
+  pinMode(pin::joyUp, INPUT_PULLUP);
+  pinMode(pin::joyDown, INPUT_PULLUP);
+  pinMode(pin::joyClick, INPUT_PULLUP);
 
-  // Initialize Pong object (do not start yet)
-  pongGame = new Pong(&display, carrier::pin::joyUp, carrier::pin::joyDown, carrier::pin::joyClick);
-  pongGame->begin();
-  // enable multiplayer mode so local joystick controls the right paddle and AI is disabled
-  // Bytt til false hvis du vil spille alene
-  pongGame->setMultiplayer(true);
-  // Helpful debug info for troubleshooting
-  Serial.println(F("Pong initialized (waiting to start)."));
-  Serial.println(F("CAN interface started at 500000 bps."));
+  Serial.println(F("Ready! Press joystick to start."));
 }
 
+// ============================================================================
+// Main loop
+// ============================================================================
 void loop()
 {
-  // Non-blocking main loop: poll CAN frequently, show start screen until user starts Pong.
-  static const uint32_t FRAME_MS = 33; // ~30 FPS
-  static uint32_t lastFrame = 0;
-  static bool startShown = false;
-
-  // Always poll CAN so echo will work even before/after gameplay
-  canReceiveAndEcho();
-
-  // Periodically send own paddle position (50 Hz) so opponent can draw it
-  if (pongGame)
+  processCAN();
+  
+  // Check for game start
+  if (!gameActive && digitalRead(pin::joyClick) == LOW)
   {
-    static uint32_t lastPaddleSend = 0;
-    uint32_t now = millis();
-    const uint32_t PADDLE_MS = 20; // 50 Hz
-    if ((now - lastPaddleSend) >= PADDLE_MS)
+    delay(50); // debounce
+    if (digitalRead(pin::joyClick) == LOW)
     {
-      lastPaddleSend = now;
-      int ownY = pongGame->getOwnY();
-      // clamp and send as uint8_t (0..63)
-      if (ownY < 0)
-        ownY = 0;
-      if (ownY > (int)display.height() - 1)
-        ownY = display.height() - 1;
-      // send paddle message
-      CAN_message_t pm;
-      pm.id = PADDLE_ID;
-      pm.len = 1;
-      pm.buf[0] = static_cast<uint8_t>(ownY);
-      can0.write(pm);
-    }
-  }
-
-    // Poll the click button to start the game (active LOW)
-  if (digitalRead(carrier::pin::joyClick) == LOW)
-  {
-    // debounce
-    delay(50);
-    if (digitalRead(carrier::pin::joyClick) == LOW)
-    {
-      // Assign master to first presser after startup
+      gameActive = true;
+      
+      // First to press becomes master
       if (!masterAssigned)
       {
         masterAssigned = true;
         isMaster = true;
-        // initialize network ball in center moving towards opponent
-        netBallX = display.width() / 2;
-        netBallY = display.height() / 2;
-        netBallVX = -1; // one pixel per 10ms to the left
-        netBallVY = 0;
-        lastBallSend = millis();
-        Serial.println(F("Master assigned: sending ball at 100Hz."));
-        // disable drawing remote ball locally (we will simulate locally)
-        if (pongGame)
-          pongGame->setRemoteBallActive(false);
-        // immediately send first ball state
-        sendBall();
+        resetBall(true);
+        Serial.println(F("*** MASTER MODE ***"));
       }
-
-      pongGame->toggleActive();
-      // clear screen to prepare for game drawing
-      display.clearDisplay();
-      display.display();
-      startShown = false; // reset so screen will show again if toggled off
-      // Wait for the user to release the click button. Without this, the
-      // same physical press can still be read by Pong::handleInput() during
-      // the first update and cause an immediate second toggle (double-toggle).
-      while (digitalRead(carrier::pin::joyClick) == LOW)
+      
+      Serial.println(F("Game started!"));
+      
+      // Wait for button release
+      while (digitalRead(pin::joyClick) == LOW)
       {
         delay(10);
       }
     }
   }
 
-  // If this device is master, update and send ball at 100Hz
-  if (isMaster)
+  if (gameActive)
   {
+    handleInput();
+    
+    // Send paddle position at 50 Hz
     uint32_t now = millis();
-    if ((now - lastBallSend) >= 10)
+    if (now - lastPaddleSend >= 20)
+    {
+      lastPaddleSend = now;
+      sendPaddle();
+    }
+
+    // Master updates and sends ball at 100 Hz
+    if (isMaster && (now - lastBallSend >= 10))
     {
       lastBallSend = now;
-      // Advance network ball
-      netBallX += netBallVX;
-      netBallY += netBallVY;
-      // simple bounds and bounce
-      if (netBallY < 0)
-      {
-        netBallY = 0;
-        netBallVY = -netBallVY;
-      }
-      if (netBallY > (int)display.height() - 1)
-      {
-        netBallY = display.height() - 1;
-        netBallVY = -netBallVY;
-      }
-      if (netBallX < 0)
-      {
-        netBallX = 0;
-        netBallVX = -netBallVX;
-      }
-      if (netBallX > (int)display.width() - 1)
-      {
-        netBallX = display.width() - 1;
-        netBallVX = -netBallVX;
-      }
-
-      // send current ball state
+      updateGame();
       sendBall();
     }
-  }
 
-  // If pong is active, update/draw at fixed frame rate
-  if (pongGame && pongGame->isActive())
-  {
-    uint32_t now = millis();
-    if ((now - lastFrame) >= FRAME_MS)
+    // Draw at ~30 FPS
+    if (now - lastGameUpdate >= 33)
     {
-      pongGame->update();
-      pongGame->draw();
-      lastFrame = now;
+      lastGameUpdate = now;
+      drawGame();
     }
-    return;
   }
-
-  // Show a simple start screen once
-  if (!startShown)
-  {
-    display.clearDisplay();
-    // Draw a rounded rectangle around the screen
-    display.drawRoundRect(0, 0, display.width(), display.height(), 5, SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(10, 20);
-    display.println(F("PONG - group 5"));
-    display.setCursor(10, 36);
-    display.println(F("Press joystick to"));
-    display.setCursor(10, 48);
-    display.println(F("start"));
-    display.display();
-    startShown = true;
-  }
-
-
-  // NOTE: paddle and master send logic was moved earlier in loop() so
-  // it runs while the game is active.
 }
 
-// removed test sendCan helpers to keep project clean (use PADDLE_ID / BALL_ID senders)
-
-// Read CAN frames and handle game messages (paddle + ball). Other messages are echoed for debug.
-void canReceiveAndEcho()
+// ============================================================================
+// CAN message processing
+// ============================================================================
+void processCAN()
 {
-  CAN_message_t rx;
-  // Read all available messages
-  while (can0.read(rx))
+  CAN_message_t msg;
+  while (can0.read(msg))
   {
-    if (rx.id == PADDLE_ID && rx.len >= 1)
+    // Paddle position message
+    if (msg.id == PADDLE_ID && msg.len >= 2)
     {
-      uint8_t remoteY = rx.buf[0];
-      // mirror vertical coordinate because opponent may have opposite coord system
-      int drawY = (int)display.height() - 1 - (int)remoteY;
-      if (pongGame)
-        pongGame->setOpponentY(drawY);
+      uint8_t senderId = msg.buf[0];
+      if (senderId == NODE_ID) continue; // Ignore own messages
+      
+      uint8_t paddleY = msg.buf[1];
+      // Mirror Y coordinate for opponent
+      opponentPaddleY = SCREEN_HEIGHT - 1 - paddleY;
+      // Clamp to valid paddle position
+      if (opponentPaddleY < 0) opponentPaddleY = 0;
+      if (opponentPaddleY > SCREEN_HEIGHT - PADDLE_HEIGHT)
+        opponentPaddleY = SCREEN_HEIGHT - PADDLE_HEIGHT;
     }
-    else if (rx.id == BALL_ID && rx.len >= 4)
+    // Ball position message
+    else if (msg.id == BALL_ID && msg.len >= 5)
     {
-      uint8_t bx = rx.buf[0];
-      uint8_t by = rx.buf[1];
-
-      // Mirror X and Y to draw from this player's perspective
-      int drawX = (int)display.width() - 1 - (int)bx;
-      int drawY = (int)display.height() - 1 - (int)by;
-      if (pongGame)
-      {
-        pongGame->setRemoteBall(drawX, drawY);
-        pongGame->setRemoteBallActive(true);
-      }
-    }
-    else
-    {
-      // default: print and echo for debugging
-      Serial.print(F("Received CAN id=0x"));
-      Serial.print(rx.id, HEX);
-      Serial.print(F(" len="));
-      Serial.print(rx.len);
-      Serial.print(F(" data:"));
-      for (uint8_t i = 0; i < rx.len; ++i)
-      {
-        Serial.print(F(" 0x"));
-        if (rx.buf[i] < 0x10)
-          Serial.print('0');
-        Serial.print(rx.buf[i], HEX);
-      }
-      Serial.println();
-
-      int32_t res = can0.write(rx);
-      if (res < 0)
-        Serial.println(F("Failed to echo CAN message."));
+      uint8_t senderId = msg.buf[0];
+      if (senderId == NODE_ID) continue; // Ignore own messages
+      
+      uint8_t bx = msg.buf[1];
+      uint8_t by = msg.buf[2];
+      
+      // Mirror X and Y for opponent's perspective
+      ballX = SCREEN_WIDTH - 1 - bx;
+      ballY = SCREEN_HEIGHT - 1 - by;
+      ballActive = true;
     }
   }
 }
 
-// Send ball (4 bytes: x, y, vx, vy) on BALL_ID
+// ============================================================================
+// Send paddle position
+// ============================================================================
+void sendPaddle()
+{
+  CAN_message_t msg;
+  msg.id = PADDLE_ID;
+  msg.len = 2;
+  msg.buf[0] = NODE_ID;
+  msg.buf[1] = static_cast<uint8_t>(ownPaddleY);
+  
+  if (can0.write(msg) < 0)
+  {
+    Serial.println(F("Failed to send paddle"));
+  }
+}
+
+// ============================================================================
+// Send ball position (master only)
+// ============================================================================
 void sendBall()
 {
-  CAN_message_t m;
-  m.id = BALL_ID;
-  m.len = 4;
-  // clamp values to 0..255 range
-  int bx = netBallX;
-  int by = netBallY;
-  if (bx < 0)
-    bx = 0;
-  if (bx > 255)
-    bx = 255;
-  if (by < 0)
-    by = 0;
-  if (by > 255)
-    by = 255;
-
-  m.buf[0] = static_cast<uint8_t>(bx);
-  m.buf[1] = static_cast<uint8_t>(by);
-  m.buf[2] = static_cast<uint8_t>(static_cast<int8_t>(netBallVX));
-  m.buf[3] = static_cast<uint8_t>(static_cast<int8_t>(netBallVY));
-
-  if (can0.write(m) < 0)
+  CAN_message_t msg;
+  msg.id = BALL_ID;
+  msg.len = 5;
+  
+  int bx = (int)masterBallX;
+  int by = (int)masterBallY;
+  
+  // Clamp to screen bounds
+  if (bx < 0) bx = 0;
+  if (bx >= SCREEN_WIDTH) bx = SCREEN_WIDTH - 1;
+  if (by < 0) by = 0;
+  if (by >= SCREEN_HEIGHT) by = SCREEN_HEIGHT - 1;
+  
+  msg.buf[0] = NODE_ID;
+  msg.buf[1] = static_cast<uint8_t>(bx);
+  msg.buf[2] = static_cast<uint8_t>(by);
+  msg.buf[3] = static_cast<uint8_t>(static_cast<int8_t>(masterBallVX));
+  msg.buf[4] = static_cast<uint8_t>(static_cast<int8_t>(masterBallVY));
+  
+  if (can0.write(msg) < 0)
   {
-    Serial.println(F("Failed to send ball CAN message."));
+    Serial.println(F("Failed to send ball"));
   }
+}
+
+// ============================================================================
+// Handle joystick input
+// ============================================================================
+void handleInput()
+{
+  if (digitalRead(pin::joyUp) == LOW)
+  {
+    ownPaddleY -= 2;
+    if (ownPaddleY < 0)
+      ownPaddleY = 0;
+  }
+  
+  if (digitalRead(pin::joyDown) == LOW)
+  {
+    ownPaddleY += 2;
+    if (ownPaddleY > SCREEN_HEIGHT - PADDLE_HEIGHT)
+      ownPaddleY = SCREEN_HEIGHT - PADDLE_HEIGHT;
+  }
+}
+
+// ============================================================================
+// Update game physics (master only)
+// ============================================================================
+void updateGame()
+{
+  if (!isMaster) return;
+
+  // Update ball position
+  masterBallX += masterBallVX;
+  masterBallY += masterBallVY;
+
+  // Bounce off top/bottom
+  if (masterBallY <= 0)
+  {
+    masterBallY = 0;
+    masterBallVY = -masterBallVY;
+  }
+  if (masterBallY >= SCREEN_HEIGHT - 2)
+  {
+    masterBallY = SCREEN_HEIGHT - 2;
+    masterBallVY = -masterBallVY;
+  }
+
+  // Left paddle collision (opponent's paddle from master's view)
+  if (masterBallX <= PADDLE_MARGIN + PADDLE_WIDTH)
+  {
+    int opponentY = SCREEN_HEIGHT - 1 - opponentPaddleY; // mirror back
+    if (opponentY < 0) opponentY = 0;
+    if (opponentY > SCREEN_HEIGHT - PADDLE_HEIGHT) opponentY = SCREEN_HEIGHT - PADDLE_HEIGHT;
+    
+    if (masterBallY + 2 >= opponentY && masterBallY <= opponentY + PADDLE_HEIGHT)
+    {
+      masterBallX = PADDLE_MARGIN + PADDLE_WIDTH;
+      masterBallVX = -masterBallVX;
+      // Add spin based on hit position
+      float relativeHit = (masterBallY - opponentY - PADDLE_HEIGHT / 2.0) / (PADDLE_HEIGHT / 2.0);
+      masterBallVY += relativeHit * 0.5;
+    }
+  }
+
+  // Right paddle collision (own paddle from master's view)
+  if (masterBallX >= SCREEN_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH - 2)
+  {
+    int ownY = SCREEN_HEIGHT - 1 - ownPaddleY; // mirror back
+    if (ownY < 0) ownY = 0;
+    if (ownY > SCREEN_HEIGHT - PADDLE_HEIGHT) ownY = SCREEN_HEIGHT - PADDLE_HEIGHT;
+    
+    if (masterBallY + 2 >= ownY && masterBallY <= ownY + PADDLE_HEIGHT)
+    {
+      masterBallX = SCREEN_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH - 2;
+      masterBallVX = -masterBallVX;
+      float relativeHit = (masterBallY - ownY - PADDLE_HEIGHT / 2.0) / (PADDLE_HEIGHT / 2.0);
+      masterBallVY += relativeHit * 0.5;
+    }
+  }
+
+  // Score detection
+  if (masterBallX < 0)
+  {
+    scoreOwn++;
+    Serial.print(F("Score: "));
+    Serial.print(scoreOpponent);
+    Serial.print(F(" - "));
+    Serial.println(scoreOwn);
+    resetBall(true);
+  }
+  else if (masterBallX >= SCREEN_WIDTH)
+  {
+    scoreOpponent++;
+    Serial.print(F("Score: "));
+    Serial.print(scoreOpponent);
+    Serial.print(F(" - "));
+    Serial.println(scoreOwn);
+    resetBall(false);
+  }
+}
+
+// ============================================================================
+// Reset ball (master only)
+// ============================================================================
+void resetBall(bool towardsOpponent)
+{
+  masterBallX = SCREEN_WIDTH / 2.0;
+  masterBallY = SCREEN_HEIGHT / 2.0;
+  masterBallVX = towardsOpponent ? -1.5 : 1.5;
+  masterBallVY = 0.5;
+}
+
+// ============================================================================
+// Draw game
+// ============================================================================
+void drawGame()
+{
+  display.clearDisplay();
+
+  // Draw center line
+  for (int y = 0; y < SCREEN_HEIGHT; y += 4)
+  {
+    display.drawFastVLine(SCREEN_WIDTH / 2, y, 2, SSD1306_WHITE);
+  }
+
+  // Draw opponent paddle (left side)
+  display.fillRect(PADDLE_MARGIN, opponentPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, SSD1306_WHITE);
+
+  // Draw own paddle (right side)
+  display.fillRect(SCREEN_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH, ownPaddleY, 
+                   PADDLE_WIDTH, PADDLE_HEIGHT, SSD1306_WHITE);
+
+  // Draw ball
+  if (isMaster)
+  {
+    display.fillRect((int)masterBallX, (int)masterBallY, 2, 2, SSD1306_WHITE);
+  }
+  else if (ballActive)
+  {
+    display.fillRect(ballX, ballY, 2, 2, SSD1306_WHITE);
+  }
+
+  // Draw score
+  display.setTextSize(1);
+  display.setCursor(SCREEN_WIDTH / 2 - 20, 2);
+  display.print(scoreOpponent);
+  display.setCursor(SCREEN_WIDTH / 2 + 12, 2);
+  display.print(scoreOwn);
+
+  display.display();
 }
 
