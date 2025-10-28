@@ -1,265 +1,428 @@
+
 #include <Arduino.h>
 #include <FlexCAN_T4.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <SPI.h>
 
-// --- SK Pang / Teensy 3.6 pins ---
-namespace carrier {
-  namespace pin {
-    constexpr uint8_t joyClick {19}; // velg master
-    constexpr uint8_t joyUp    {22};
-    constexpr uint8_t joyDown  {23};
+// ============================================================================
+// HARDWARE KONFIGURASJON (SK Pang / Teensy 3.6)
+// ============================================================================
+namespace carrier 
+{
+  namespace pin 
+  {
+    constexpr uint8_t joyClick    = 19;
+    constexpr uint8_t joyUp       = 22;
+    constexpr uint8_t joyDown     = 23;
 
-    constexpr uint8_t oledDcPower {6};
-    constexpr uint8_t oledCs      {10};
-    constexpr uint8_t oledReset   {5};
+    constexpr uint8_t oledDcPower = 6;
+    constexpr uint8_t oledCs      = 10;
+    constexpr uint8_t oledReset   = 5;
   }
-  namespace oled { constexpr int W=128, H=64; }
+  
+  namespace oled 
+  { 
+    constexpr int W = 128;
+    constexpr int H = 64;
+  }
 }
 
-// OLED via SPI
+// OLED skjerm via SPI
 Adafruit_SSD1306 display(
-  carrier::oled::W, carrier::oled::H,
-  &SPI, carrier::pin::oledDcPower,
-  carrier::pin::oledReset, carrier::pin::oledCs
+  carrier::oled::W, 
+  carrier::oled::H,
+  &SPI, 
+  carrier::pin::oledDcPower,
+  carrier::pin::oledReset, 
+  carrier::pin::oledCs
 );
 
-// CAN0
+// CAN-buss
 FlexCAN_T4<CAN0, RX_SIZE_256, TX_SIZE_16> can0;
 
-// --- IDs (sett riktig gruppenr) ---
-constexpr uint8_t  GROUP_ID   = 5;
-constexpr uint32_t PADDLE_ID  = GROUP_ID + 20; // egen/remote paddlepos
-constexpr uint32_t BALL_ID    = GROUP_ID + 50; // ballpos
-constexpr uint32_t SCORE_ID   = GROUP_ID + 55; // poeng
+// ============================================================================
+// CAN MELDINGSTYPER (sett riktig gruppenummer)
+// ============================================================================
+constexpr uint8_t  GROUP_ID  = 5;
+constexpr uint32_t PADDLE_ID = GROUP_ID + 20;  // Paddle-posisjon
+constexpr uint32_t BALL_ID   = GROUP_ID + 50;  // Ball-posisjon
+constexpr uint32_t SCORE_ID  = GROUP_ID + 55;  // Poengstilling
 
-// --- Geometri / spillefelt ---
-constexpr int SW = carrier::oled::W;
-constexpr int SH = carrier::oled::H;
+// ============================================================================
+// SPILLEFELT GEOMETRI
+// ============================================================================
+constexpr int SCREEN_WIDTH  = carrier::oled::W;
+constexpr int SCREEN_HEIGHT = carrier::oled::H;
 
-constexpr int BORDER     = 3;
-constexpr int TITLE_H    = 0;                    // ingen tittel
+// Ramme
+constexpr int BORDER   = 3;
+constexpr int TITLE_H  = 0;  // Ingen tittel
+
+// Spillbart område
 constexpr int PLAY_LEFT  = BORDER + 1;
-constexpr int PLAY_RIGHT = SW - BORDER - 2;
+constexpr int PLAY_RIGHT = SCREEN_WIDTH - BORDER - 2;
 constexpr int PLAY_TOP   = BORDER + TITLE_H + 1;
-constexpr int PLAY_BOT   = SH - BORDER - 2;
+constexpr int PLAY_BOT   = SCREEN_HEIGHT - BORDER - 2;
 
-constexpr int PAD_W = 2;
-constexpr int PAD_H = 20;                        // høyde, god dekning av midten
-constexpr int PAD_X_MY  = PLAY_RIGHT - 2 - PAD_W;
-constexpr int PAD_X_OPP = PLAY_LEFT  + 2;
+// Paddle
+constexpr int PADDLE_WIDTH  = 2;
+constexpr int PADDLE_HEIGHT = 20;
+constexpr int PADDLE_X_OWN      = PLAY_RIGHT - 2 - PADDLE_WIDTH;  // Høyre side (deg)
+constexpr int PADDLE_X_OPPONENT = PLAY_LEFT + 2;                   // Venstre side (motstander)
 
-constexpr uint8_t BALL_R = 2;
+// Ball
+constexpr int BALL_RADIUS = 2;
 
-// --- Hastigheter/rater ---
-constexpr uint32_t TX_PADDLE_MS = 40;  // 25 Hz
-constexpr uint32_t TX_BALL_MS   = 10;  // 100 Hz
-constexpr uint32_t STEP_DT_MS   = 15;  // paddle step-rate
-constexpr int      VEL_X_INIT   = -1;  // 1 px / 10ms = 100 px/s
-constexpr int      VEL_Y_INIT   =  1;
+// ============================================================================
+// OPPDATERINGSRATER
+// ============================================================================
+constexpr uint32_t PADDLE_SEND_INTERVAL_MS = 40;  // 25 Hz - Send paddle-posisjon
+constexpr uint32_t BALL_UPDATE_INTERVAL_MS  = 10;  // 100 Hz - Ball-fysikk (kun master)
+constexpr uint32_t PADDLE_MOVE_INTERVAL_MS  = 15;  // Paddle-bevegelse (1 pixel per 15 ms)
+constexpr uint32_t DRAW_INTERVAL_MS         = 33;  // ~30 FPS - Tegning
 
-// --- Tilstand ---
+// Ballhastighet
+constexpr int BALL_VELOCITY_X_INIT = -1;  // Starter mot venstre
+constexpr int BALL_VELOCITY_Y_INIT = 1;
+
+// ============================================================================
+// SPILLTILSTAND
+// ============================================================================
 volatile bool isMaster = false;
-int myY  = (PLAY_TOP + PLAY_BOT - PAD_H)/2;
-int oppY = (PLAY_TOP + PLAY_BOT - PAD_H)/2;
 
-bool  ballVisible = false;
-int   ballX = (PLAY_LEFT + PLAY_RIGHT)/2;
-int   ballY = (PLAY_TOP  + PLAY_BOT)/2;
-int   vx = VEL_X_INIT, vy = VEL_Y_INIT;
+// Paddle-posisjoner (Y-koordinat for toppen av paddle)
+int ownPaddleY      = (PLAY_TOP + PLAY_BOT - PADDLE_HEIGHT) / 2;
+int opponentPaddleY = (PLAY_TOP + PLAY_BOT - PADDLE_HEIGHT) / 2;
 
-uint8_t scoreL = 0;    // venstre (motstander)
-uint8_t scoreR = 0;    // høyre (deg)
+// Ball-tilstand
+bool ballVisible = false;
+int  ballX       = (PLAY_LEFT + PLAY_RIGHT) / 2;
+int  ballY       = (PLAY_TOP + PLAY_BOT) / 2;
+int  ballVelocityX = BALL_VELOCITY_X_INIT;
+int  ballVelocityY = BALL_VELOCITY_Y_INIT;
 
-// --- Utils ---
-static inline int clampi(int v,int lo,int hi){ return v<lo?lo:(v>hi?hi:v); }
-static inline uint8_t centerByteFromTop(int top){ return (uint8_t)clampi(top + PAD_H/2, 0, 63); }
-static inline int topFromCenterByte(uint8_t c){ return clampi((int)c - PAD_H/2, PLAY_TOP, PLAY_BOT - PAD_H); }
+// Poengstilling
+uint8_t scoreLeft  = 0;  // Venstre side (motstander)
+uint8_t scoreRight = 0;  // Høyre side (deg)
 
-// --- Tegn statisk ramme ---
-static void drawStaticFrame() {
+// ============================================================================
+// HJELPEFUNKSJONER
+// ============================================================================
+
+// Begrens verdi til gitt område
+static inline int clamp(int value, int minValue, int maxValue) 
+{
+  if (value < minValue) return minValue;
+  if (value > maxValue) return maxValue;
+  return value;
+}
+
+// Konverter paddle-topp til senter-byte for CAN-sending
+static inline uint8_t paddleTopToCenter(int top) 
+{
+  return (uint8_t)clamp(top + PADDLE_HEIGHT / 2, 0, 63);
+}
+
+// Konverter senter-byte fra CAN til paddle-topp
+static inline int paddleCenterToTop(uint8_t center) 
+{
+  return clamp((int)center - PADDLE_HEIGHT / 2, PLAY_TOP, PLAY_BOT - PADDLE_HEIGHT);
+}
+
+// ============================================================================
+// TEGNE-FUNKSJONER
+// ============================================================================
+
+// Tegn statisk ramme rundt spillefeltet
+static void drawStaticFrame() 
+{
   display.clearDisplay();
-  display.drawRect(0, 0, SW, SH, SSD1306_WHITE);
-  display.drawRect(BORDER, BORDER, SW-2*BORDER, SH-2*BORDER, SSD1306_WHITE);
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  display.drawRect(BORDER, BORDER, SCREEN_WIDTH - 2 * BORDER, SCREEN_HEIGHT - 2 * BORDER, SSD1306_WHITE);
   display.display();
 }
 
-// --- Render dynamikk (felt, midtstrek, score, paddler, ball) ---
-static void render() {
-  // Tøm felt + margin = BALL_R for å fjerne evt. ghost langs kant
-  int clearX = max(PLAY_LEFT - BALL_R, 1);
-  int clearY = max(PLAY_TOP  - BALL_R, 1);
-  int clearW = min(PLAY_RIGHT + BALL_R, SW-2) - clearX + 1;
-  int clearH = min(PLAY_BOT   + BALL_R, SH-2) - clearY + 1;
+// Tegn spillefeltet med alt innhold
+static void render() 
+{
+  // Tøm spillefeltet (med margin for ballradius)
+  int clearX = max(PLAY_LEFT - BALL_RADIUS, 1);
+  int clearY = max(PLAY_TOP - BALL_RADIUS, 1);
+  int clearW = min(PLAY_RIGHT + BALL_RADIUS, SCREEN_WIDTH - 2) - clearX + 1;
+  int clearH = min(PLAY_BOT + BALL_RADIUS, SCREEN_HEIGHT - 2) - clearY + 1;
   display.fillRect(clearX, clearY, clearW, clearH, SSD1306_BLACK);
 
-  // Midtstrek
+  // Tegn midtstrek
   for (int y = PLAY_TOP; y <= PLAY_BOT; y += 4)
-    display.drawFastVLine((SW/2), y, 2, SSD1306_WHITE);
+  {
+    display.drawFastVLine(SCREEN_WIDTH / 2, y, 2, SSD1306_WHITE);
+  }
 
-  // --- FIX: poengtelling justert for tosifrede tall ---
+  // Tegn poengstilling
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  // Venstre score
+  // Venstre score (motstander)
   display.setCursor(PLAY_LEFT + 2, BORDER + 1);
-  display.print(scoreL);
+  display.print(scoreLeft);
 
-  // Høyre score – flytt litt til venstre hvis tosifret
-  int xRight = (scoreR >= 10) ? (PLAY_RIGHT - 12) : (PLAY_RIGHT - 6);
-  display.setCursor(xRight, BORDER + 1);
-  display.print(scoreR);
+  // Høyre score (deg) - juster for tosifrede tall
+  int scoreXPosition = (scoreRight >= 10) ? (PLAY_RIGHT - 12) : (PLAY_RIGHT - 6);
+  display.setCursor(scoreXPosition, BORDER + 1);
+  display.print(scoreRight);
 
-  // Paddler
-  display.fillRect(PAD_X_OPP, oppY, PAD_W, PAD_H, SSD1306_WHITE);
-  display.fillRect(PAD_X_MY,  myY,  PAD_W, PAD_H, SSD1306_WHITE);
+  // Tegn paddler
+  display.fillRect(PADDLE_X_OPPONENT, opponentPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, SSD1306_WHITE);
+  display.fillRect(PADDLE_X_OWN, ownPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, SSD1306_WHITE);
 
-  // Ball
-  if (ballVisible) display.fillCircle(ballX, ballY, BALL_R, SSD1306_WHITE);
+  // Tegn ball
+  if (ballVisible)
+  {
+    display.fillCircle(ballX, ballY, BALL_RADIUS, SSD1306_WHITE);
+  }
 
   display.display();
 }
 
-// --- CAN RX ---
-static void onRx(const CAN_message_t& m) {
-  if (m.id == PADDLE_ID && m.len >= 1) {
-    oppY = topFromCenterByte(m.buf[0]);
-  } else if (m.id == BALL_ID && m.len >= 2) {
-    // Speil X for motstanders koordinater
-    uint8_t rx = m.buf[0], ry = m.buf[1];
-    ballX = (SW - 1) - rx;
-    ballY = ry;
+// ============================================================================
+// CAN MELDINGSHÅNDTERING
+// ============================================================================
+
+// Callback for mottatte CAN-meldinger
+static void onCanReceive(const CAN_message_t& message) 
+{
+  // Motta paddle-posisjon fra motstander
+  if (message.id == PADDLE_ID && message.len >= 1) 
+  {
+    opponentPaddleY = paddleCenterToTop(message.buf[0]);
+  } 
+  
+  // Motta ball-posisjon fra master
+  else if (message.id == BALL_ID && message.len >= 2) 
+  {
+    // Speil X-koordinat for motstanders koordinatsystem
+    uint8_t receivedX = message.buf[0];
+    uint8_t receivedY = message.buf[1];
+    
+    ballX = (SCREEN_WIDTH - 1) - receivedX;
+    ballY = receivedY;
     ballVisible = true;
-  } else if (m.id == SCORE_ID && m.len >= 2) {
-    scoreL = m.buf[0];
-    scoreR = m.buf[1];
+  } 
+  
+  // Motta poengstilling
+  else if (message.id == SCORE_ID && message.len >= 2) 
+  {
+    scoreLeft = message.buf[0];
+    scoreRight = message.buf[1];
   }
 }
 
-// --- Oppstart ---
-void setup() {
+// ============================================================================
+// SETUP
+// ============================================================================
+void setup() 
+{
+  // Initialiser seriell kommunikasjon
   Serial.begin(115200);
   delay(200);
 
-  pinMode(carrier::pin::joyUp,    INPUT_PULLUP);
-  pinMode(carrier::pin::joyDown,  INPUT_PULLUP);
+  // Konfigurer joystick-pinner
+  pinMode(carrier::pin::joyUp, INPUT_PULLUP);
+  pinMode(carrier::pin::joyDown, INPUT_PULLUP);
   pinMode(carrier::pin::joyClick, INPUT_PULLUP);
 
-  if (!display.begin(SSD1306_SWITCHCAPVCC)) { while(1); }
+  // Initialiser OLED-skjerm
+  if (!display.begin(SSD1306_SWITCHCAPVCC)) 
+  {
+    Serial.println(F("ERROR: Display init failed!"));
+    while (1);  // Stopp hvis skjerm feiler
+  }
   drawStaticFrame();
 
+  // Initialiser CAN-buss
   can0.begin();
   can0.setBaudRate(500000);
   can0.enableFIFO();
   can0.enableFIFOInterrupt();
-  can0.onReceive(onRx);
+  can0.onReceive(onCanReceive);
 
-  myY  = clampi(myY,  PLAY_TOP, PLAY_BOT - PAD_H);
-  oppY = clampi(oppY, PLAY_TOP, PLAY_BOT - PAD_H);
+  // Sett startposisjoner
+  ownPaddleY = clamp(ownPaddleY, PLAY_TOP, PLAY_BOT - PADDLE_HEIGHT);
+  opponentPaddleY = clamp(opponentPaddleY, PLAY_TOP, PLAY_BOT - PADDLE_HEIGHT);
   ballVisible = false;
 
-  Serial.println(F("Ping-Pong: klar (CAN0 @ 500k)"));
+  Serial.println(F("=== CAN Pong - Gruppe 5 ==="));
+  Serial.println(F("CAN0 @ 500 kbps - Klar!"));
+  Serial.println(F("Trykk joystick for å bli master"));
 }
 
-// --- Hovedløkke ---
-void loop() {
+// ============================================================================
+// MAIN LOOP (HOVEDLØKKE)
+// ============================================================================
+void loop() 
+{
+  // Prosesser innkommende CAN-meldinger
   can0.events();
 
-  // Mastervalg: første klikk
-  static bool masterLocked=false;
-  if (!masterLocked && digitalRead(carrier::pin::joyClick)==LOW) {
-    isMaster = true; masterLocked = true;
-    // Serve fra høyre
-    ballX = PAD_X_MY - 4;
-    ballY = myY + PAD_H/2;
-    vx = VEL_X_INIT; vy = VEL_Y_INIT;
+  // -------------------------------------------------------------------------
+  // MASTERVALG: Første som trykker joystick blir master
+  // -------------------------------------------------------------------------
+  static bool masterLocked = false;
+  if (!masterLocked && digitalRead(carrier::pin::joyClick) == LOW) 
+  {
+    isMaster = true;
+    masterLocked = true;
+    
+    // Start ball fra høyre side (serve)
+    ballX = PADDLE_X_OWN - 4;
+    ballY = ownPaddleY + PADDLE_HEIGHT / 2;
+    ballVelocityX = BALL_VELOCITY_X_INIT;
+    ballVelocityY = BALL_VELOCITY_Y_INIT;
     ballVisible = true;
-    delay(150); // debounce
+    
+    Serial.println(F("*** DU ER MASTER ***"));
+    delay(150);  // Debounce
   }
 
-  // Din paddle: 1 px hvert 15 ms for mange mellomposisjoner
-  static uint32_t tStep = 0;
-  const bool up   = (digitalRead(carrier::pin::joyUp)  == LOW);
-  const bool down = (digitalRead(carrier::pin::joyDown)== LOW);
-  if (millis() - tStep >= STEP_DT_MS) {
-    tStep = millis();
-    if (up   && !down) myY -= 1;
-    if (down && !up)   myY += 1;
-    myY = clampi(myY, PLAY_TOP, PLAY_BOT - PAD_H);
+  // -------------------------------------------------------------------------
+  // PADDLE INPUT: Beveg egen paddle med joystick
+  // -------------------------------------------------------------------------
+  static uint32_t lastPaddleMove = 0;
+  const bool joyUp = (digitalRead(carrier::pin::joyUp) == LOW);
+  const bool joyDown = (digitalRead(carrier::pin::joyDown) == LOW);
+  
+  if (millis() - lastPaddleMove >= PADDLE_MOVE_INTERVAL_MS) 
+  {
+    lastPaddleMove = millis();
+    
+    if (joyUp && !joyDown) 
+    {
+      ownPaddleY -= 1;
+    }
+    if (joyDown && !joyUp) 
+    {
+      ownPaddleY += 1;
+    }
+    
+    ownPaddleY = clamp(ownPaddleY, PLAY_TOP, PLAY_BOT - PADDLE_HEIGHT);
   }
 
-  // Send paddlepos @ 25 Hz
-  static uint32_t tPad=0;
-  if (millis()-tPad >= TX_PADDLE_MS) {
-    tPad = millis();
-    CAN_message_t tx{};
-    tx.id  = PADDLE_ID;
-    tx.len = 1;
-    tx.buf[0] = centerByteFromTop(myY);
-    can0.write(tx);
+  // -------------------------------------------------------------------------
+  // SEND PADDLE: Send egen paddle-posisjon @ 25 Hz
+  // -------------------------------------------------------------------------
+  static uint32_t lastPaddleSend = 0;
+  if (millis() - lastPaddleSend >= PADDLE_SEND_INTERVAL_MS) 
+  {
+    lastPaddleSend = millis();
+    
+    CAN_message_t paddleMsg{};
+    paddleMsg.id = PADDLE_ID;
+    paddleMsg.len = 1;
+    paddleMsg.buf[0] = paddleTopToCenter(ownPaddleY);
+    can0.write(paddleMsg);
   }
 
-  // Master: ballfysikk @ 100 Hz
-  static uint32_t tBall=0;
-  if (isMaster && (millis()-tBall >= TX_BALL_MS)) {
-    tBall = millis();
+  // -------------------------------------------------------------------------
+  // BALL FYSIKK: Kun master simulerer ball @ 100 Hz
+  // -------------------------------------------------------------------------
+  static uint32_t lastBallUpdate = 0;
+  if (isMaster && (millis() - lastBallUpdate >= BALL_UPDATE_INTERVAL_MS)) 
+  {
+    lastBallUpdate = millis();
 
-    ballX += vx;
-    ballY += vy;
+    // Oppdater ball-posisjon
+    ballX += ballVelocityX;
+    ballY += ballVelocityY;
 
-    // Sprett i topp/bunn
-    if (ballY <= PLAY_TOP + BALL_R)       { ballY = PLAY_TOP + BALL_R;       vy = -vy; }
-    if (ballY >= PLAY_BOT - BALL_R)       { ballY = PLAY_BOT - BALL_R;       vy = -vy; }
-
-    // Kollisjon venstre paddle
-    if (ballX - BALL_R <= PAD_X_OPP + PAD_W &&
-        ballY >= oppY && ballY <= oppY + PAD_H) {
-      ballX = PAD_X_OPP + PAD_W + BALL_R;
-      vx = -vx;
+    // Sprett i topp og bunn
+    if (ballY <= PLAY_TOP + BALL_RADIUS) 
+    {
+      ballY = PLAY_TOP + BALL_RADIUS;
+      ballVelocityY = -ballVelocityY;
+    }
+    if (ballY >= PLAY_BOT - BALL_RADIUS) 
+    {
+      ballY = PLAY_BOT - BALL_RADIUS;
+      ballVelocityY = -ballVelocityY;
     }
 
-    // Kollisjon høyre paddle
-    if (ballX + BALL_R >= PAD_X_MY &&
-        ballY >= myY && ballY <= myY + PAD_H) {
-      ballX = PAD_X_MY - BALL_R;
-      vx = -vx;
+    // Kollisjon med venstre paddle (motstander)
+    if (ballX - BALL_RADIUS <= PADDLE_X_OPPONENT + PADDLE_WIDTH &&
+        ballY >= opponentPaddleY && 
+        ballY <= opponentPaddleY + PADDLE_HEIGHT) 
+    {
+      ballX = PADDLE_X_OPPONENT + PADDLE_WIDTH + BALL_RADIUS;
+      ballVelocityX = -ballVelocityX;
     }
 
-    // Scoring + clamp X for å unngå at sirkelen tegnes utenfor feltet
+    // Kollisjon med høyre paddle (deg)
+    if (ballX + BALL_RADIUS >= PADDLE_X_OWN &&
+        ballY >= ownPaddleY && 
+        ballY <= ownPaddleY + PADDLE_HEIGHT) 
+    {
+      ballX = PADDLE_X_OWN - BALL_RADIUS;
+      ballVelocityX = -ballVelocityX;
+    }
+
+    // Sjekk scoring
     bool scored = false;
-    if (ballX < PLAY_LEFT + BALL_R)  { scoreR++; scored = true; }
-    if (ballX > PLAY_RIGHT - BALL_R) { scoreL++; scored = true; }
+    if (ballX < PLAY_LEFT + BALL_RADIUS) 
+    {
+      scoreRight++;  // Du scorer
+      scored = true;
+    }
+    if (ballX > PLAY_RIGHT - BALL_RADIUS) 
+    {
+      scoreLeft++;   // Motstander scorer
+      scored = true;
+    }
 
-    if (scored) {
-      CAN_message_t s{};
-      s.id = SCORE_ID; s.len = 2;
-      s.buf[0] = scoreL; s.buf[1] = scoreR;
-      can0.write(s);
+    // Hvis noen scoret, send poeng og reset ball
+    if (scored) 
+    {
+      // Send oppdatert poengstilling
+      CAN_message_t scoreMsg{};
+      scoreMsg.id = SCORE_ID;
+      scoreMsg.len = 2;
+      scoreMsg.buf[0] = scoreLeft;
+      scoreMsg.buf[1] = scoreRight;
+      can0.write(scoreMsg);
+
+      Serial.print(F("Poeng: "));
+      Serial.print(scoreLeft);
+      Serial.print(F(" - "));
+      Serial.println(scoreRight);
 
       // Ny serve fra høyre
-      ballX = PAD_X_MY - 4;
-      ballY = myY + PAD_H/2;
-      vx = VEL_X_INIT; vy = (vy>=0)?VEL_Y_INIT:-VEL_Y_INIT;
+      ballX = PADDLE_X_OWN - 4;
+      ballY = ownPaddleY + PADDLE_HEIGHT / 2;
+      ballVelocityX = BALL_VELOCITY_X_INIT;
+      ballVelocityY = (ballVelocityY >= 0) ? BALL_VELOCITY_Y_INIT : -BALL_VELOCITY_Y_INIT;
       ballVisible = true;
-    } else {
-      // Hold ball-sentrum innenfor feltet i X
-      ballX = clampi(ballX, PLAY_LEFT + BALL_R, PLAY_RIGHT - BALL_R);
+    } 
+    else 
+    {
+      // Hold ball innenfor spillefeltet i X-retning
+      ballX = clamp(ballX, PLAY_LEFT + BALL_RADIUS, PLAY_RIGHT - BALL_RADIUS);
     }
 
-    // Send ballpos (vårt koordinatsystem)
-    CAN_message_t tx{};
-    tx.id  = BALL_ID;
-    tx.len = 2;
-    tx.buf[0] = (uint8_t)clampi(ballX, 0, 127);
-    tx.buf[1] = (uint8_t)clampi(ballY, 0,  63);
-    can0.write(tx);
+    // Send ball-posisjon over CAN
+    CAN_message_t ballMsg{};
+    ballMsg.id = BALL_ID;
+    ballMsg.len = 2;
+    ballMsg.buf[0] = (uint8_t)clamp(ballX, 0, 127);
+    ballMsg.buf[1] = (uint8_t)clamp(ballY, 0, 63);
+    can0.write(ballMsg);
   }
 
-  // Tegn alt ~30 Hz
-  static uint32_t tDraw=0;
-  if (millis()-tDraw >= 33) {
-    tDraw = millis();
+  // -------------------------------------------------------------------------
+  // TEGNING: Oppdater skjerm @ ~30 FPS
+  // -------------------------------------------------------------------------
+  static uint32_t lastDraw = 0;
+  if (millis() - lastDraw >= DRAW_INTERVAL_MS) 
+  {
+    lastDraw = millis();
     render();
   }
 }
