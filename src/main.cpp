@@ -29,7 +29,7 @@ Adafruit_SSD1306 display(
 FlexCAN_T4<CAN0, RX_SIZE_256, TX_SIZE_16> can0;
 
 // --- IDs (sett riktig gruppenr) ---
-constexpr uint8_t  GROUP_ID   = 10;
+constexpr uint8_t  GROUP_ID   = 5;
 constexpr uint32_t PADDLE_ID  = GROUP_ID + 20; // egen/remote paddlepos
 constexpr uint32_t BALL_ID    = GROUP_ID + 50; // ballpos
 constexpr uint32_t SCORE_ID   = GROUP_ID + 55; // poeng
