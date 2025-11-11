@@ -222,7 +222,7 @@ static void onCanReceive(const CAN_message_t& message)
 // SETUP
 // ============================================================================
 void setup() 
-{
+{  
   // Initialiser seriell kommunikasjon
   // ---------------------------------------------------------------------------
   // NOTE: initialization (pins, Serial, display, CAN) should be here. 
