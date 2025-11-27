@@ -50,7 +50,7 @@ constexpr uint32_t BALL_ID   = GROUP_ID + 50;  // Ball-posisjon
 constexpr uint32_t SCORE_ID  = GROUP_ID + 55;  // Poengstilling
 
 // ============================================================================
-// SPILLEFELT GEOMETRI
+// SPILLEFELT GEOMETRI her burde det blitt brukt mindre globale variabler og mer namespace
 // ============================================================================
 constexpr int SCREEN_WIDTH  = carrier::oled::W;
 constexpr int SCREEN_HEIGHT = carrier::oled::H;
@@ -253,7 +253,8 @@ static void processCanEvents()
 {
   // Poll and dispatch any received CAN messages.
   CAN_message_t msg;
-  while (can0.read(msg)) {
+  while (can0.read(msg)) 
+  {
     onCanReceive(msg);
   }
 }
@@ -284,7 +285,8 @@ static void handlePaddleInput()
   const bool joyUp = (digitalRead(carrier::pin::joyUp) == LOW);
   const bool joyDown = (digitalRead(carrier::pin::joyDown) == LOW);
 
-  if (millis() - lastPaddleMove >= PADDLE_MOVE_INTERVAL_MS) {
+  if (millis() - lastPaddleMove >= PADDLE_MOVE_INTERVAL_MS) 
+  {
     lastPaddleMove = millis();
     if (joyUp && !joyDown) ownPaddleY -= 1;
     if (joyDown && !joyUp) ownPaddleY += 1;
@@ -349,12 +351,16 @@ static void updateBallIfMaster()
 
     if (scored) {
       CAN_message_t scoreMsg{};
-      scoreMsg.id = SCORE_ID; scoreMsg.len = 2;
-      scoreMsg.buf[0] = scoreLeft; scoreMsg.buf[1] = scoreRight;
+      scoreMsg.id = SCORE_ID; 
+      scoreMsg.len = 2;
+      scoreMsg.buf[0] = scoreLeft; 
+      scoreMsg.buf[1] = scoreRight;
       can0.write(scoreMsg);
 
-      Serial.print(F("Poeng: ")); Serial.print(scoreLeft);
-      Serial.print(F(" - ")); Serial.println(scoreRight);
+      Serial.print(F("Poeng: ")); 
+      Serial.print(scoreLeft);
+      Serial.print(F(" - ")); 
+      Serial.println(scoreRight);
 
       // Ny serve
       ballX = PADDLE_X_OWN - 4;
